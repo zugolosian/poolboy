@@ -1,5 +1,7 @@
-.rebar
+/rebar.lock
+/poolboy.iml
+/.idea
 .eunit
-.dialyzer_plt
-erl_crash.dump
+.rebar
+_build
 ebin
