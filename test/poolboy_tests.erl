@@ -45,11 +45,14 @@ pool_test_() ->
             {<<"Pool with overflow_ttl behaves as expected">>,
                 fun pool_overflow_ttl_workers/0
             },
-            {<<"Lifo pool with overflow_ttl rips workers">>,
-                fun lifo_overflow_rip_test/0
+            {<<"Lifo pool with overflow_ttl reaps workers">>,
+                fun lifo_overflow_reap_test/0
             },
-            {<<"Fifo pool with overflow_ttl rips workers">>,
-                fun fifo_overflow_rip_test/0
+            {<<"Fifo pool with overflow_ttl reaps workers">>,
+                fun fifo_overflow_reap_test/0
+            },
+            {<<"Large pool with overflow_ttl reaps workers">>,
+                fun large_overflow_reap_test/0
             },
             {<<"Pool behaves on owner death">>,
                 fun owner_death/0
@@ -448,7 +451,7 @@ pool_overflow_ttl_workers() ->
     ?assertEqual({ready, 1, 0, 0}, poolboy:status(Pid)),
     ok = pool_call(Pid, stop).
 
-lifo_overflow_rip_test() ->
+lifo_overflow_reap_test() ->
     {ok, Pid} = new_pool_with_overflow_ttl(1, 2, 300, lifo),
     Worker = poolboy:checkout(Pid),
     Worker1 = poolboy:checkout(Pid),
@@ -461,7 +464,7 @@ lifo_overflow_rip_test() ->
     ?assertEqual({ready, 1, 0, 0}, poolboy:status(Pid)),
     ok = pool_call(Pid, stop).
 
-fifo_overflow_rip_test() ->
+fifo_overflow_reap_test() ->
     {ok, Pid} = new_pool_with_overflow_ttl(1, 2, 300, fifo),
     Worker = poolboy:checkout(Pid),
     Worker1 = poolboy:checkout(Pid),
@@ -473,6 +476,17 @@ fifo_overflow_rip_test() ->
     timer:sleep(500),
     ?assertEqual({ready, 1, 0, 0}, poolboy:status(Pid)),
     ok = pool_call(Pid, stop).
+
+%% large_overflow_reap_test() ->
+%%     {ok, Pid} = new_pool_with_overflow_ttl(1, 1000, 300, fifo),
+%%     Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 1000)],
+%%     ?assertEqual({full, 0, 1000, 1001}, poolboy:status(Pid)),
+%%     lists:foreach(fun(Worker) ->
+%%         checkin_worker(Worker, Pid)
+%%     end, Workers),
+%%     timer:sleep(500),
+%%     ?assertEqual({overflow, 0, 0, 1}, poolboy:status(Pid)),
+%%     ok = pool_call(Pid, stop).
 
 owner_death() ->
     %% Check that a dead owner (a process that dies with a worker checked out)

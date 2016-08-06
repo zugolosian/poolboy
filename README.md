@@ -167,9 +167,13 @@ code_change(_OldVsn, State, _Extra) ->
 - `strategy`: `lifo` or `fifo`, determines whether checked in workers should be
   placed first or last in the line of available workers. Default is `lifo`.
 - `overflow_ttl`: time in milliseconds you want to wait before removing overflow
-  workers. Useful when it's expensive to start workers. Default is 0.
-- `overflow_check_period`: time in milliseconds for checking overflow workers to rip. 
-  Default is min(1 sec, overflow_ttl). Cheking job will not be started, if overflow_ttl is 0.
+  workers. Time is set at checkin. If overflow_check_period exceeds 
+  overflow_ttl workers will not be reaped before check period  Useful when it's 
+  expensive to start workers. Default is 0.
+- `overflow_check_period`: time in milliseconds for checking overflow workers
+ to reap. Default is min(1 sec, overflow_ttl). Check will not be run, if 
+ overflow_ttl is 0. The check period starts only after reaping run is complete.
+ The overflow_ttl should be greater than the check period 
   
 ## Pool Status
 Returns : {Status, Workers, Overflow, InUse}

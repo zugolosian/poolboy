@@ -10,7 +10,7 @@
 -export_type([pool/0]).
 
 -define(TIMEOUT, 5000).
--define(CHECK_OVERFLOW_DEFAULT_PERIOD, 1000000).  %microseconds (1 sec)
+-define(CHECK_OVERFLOW_DEFAULT_PERIOD, 1000).  %milliseconds (1 sec)
 
 -ifdef(pre17).
 -type pid_queue() :: queue().
@@ -38,7 +38,7 @@
     max_overflow = 10 :: non_neg_integer(),
     strategy = lifo :: lifo | fifo,
     overflow_check_period :: non_neg_integer(), %milliseconds
-    overflow_ttl = 0 :: non_neg_integer()   %microseconds
+    overflow_ttl = 0 :: non_neg_integer()   %milliseconds
 }).
 
 -spec checkout(Pool :: pool()) -> pid().
@@ -141,15 +141,15 @@ init([{strategy, lifo} | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State#state{strategy = lifo});
 init([{strategy, fifo} | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State#state{strategy = fifo});
-init([{overflow_ttl, OverflowTtl} | Rest], WorkerArgs, State) when is_integer(OverflowTtl) ->
-    init(Rest, WorkerArgs, State#state{overflow_ttl = OverflowTtl * 1000});
+init([{overflow_ttl, OverflowTTL} | Rest], WorkerArgs, State) when is_integer(OverflowTTL) ->
+    init(Rest, WorkerArgs, State#state{overflow_ttl = OverflowTTL});
 init([{overflow_check_period, OverflowCheckPeriod} | Rest], WorkerArgs, State) when is_integer(OverflowCheckPeriod) ->
     init(Rest, WorkerArgs, State#state{overflow_check_period = OverflowCheckPeriod});
 init([_ | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State);
 init([], _WorkerArgs, #state{size = Size, supervisor = Sup} = State) ->
     Workers = prepopulate(Size, Sup),
-    start_timer(State),
+    start_reap_timer(State),
     {ok, State#state{workers = Workers}}.
 
 handle_cast({checkin, Pid}, State = #state{monitors = Monitors}) ->
@@ -255,20 +255,21 @@ handle_info({'EXIT', Pid, _Reason}, State) ->
             case lists:keymember(Pid, 1, Workers) of
                 true ->
                     W = lists:keydelete(Pid, 1, Workers),
-                    {noreply, State#state{workers = [{new_worker(Sup), erlang:monotonic_time(micro_seconds)} | W]}};
+                    {noreply, State#state{workers = [{new_worker(Sup),
+                        erlang:monotonic_time(milli_seconds)} | W]}};
                 false ->
                     {noreply, State}
             end
     end;
-handle_info({rip_workers, TimerTTL}, State) ->
+handle_info({reap_workers, TimerTTL}, State) ->
     #state{overflow = Overflow,
         overflow_ttl = OverTTL,
         workers = Workers,
         strategy = Strategy,
         supervisor = Sup} = State,
-    Now = erlang:monotonic_time(micro_seconds),
+    Now = erlang:monotonic_time(milli_seconds),
     {UOverflow, UWorkers} = do_reap_workers(Workers, Now, OverTTL, Overflow, Sup, [], Strategy),
-    erlang:send_after(TimerTTL, self(), {rip_workers, TimerTTL}),
+    erlang:send_after(TimerTTL, self(), {reap_workers, TimerTTL}),
     {noreply, State#state{overflow = UOverflow, workers = UWorkers}};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -306,7 +307,8 @@ prepopulate(N, Sup) ->
 prepopulate(0, _Sup, Workers) ->
     Workers;
 prepopulate(N, Sup, Workers) ->
-    prepopulate(N-1, Sup, [{new_worker(Sup), erlang:monotonic_time(micro_seconds)} | Workers]).
+    prepopulate(N-1, Sup, [{new_worker(Sup), erlang:monotonic_time
+    (milli_seconds)} | Workers]).
 
 handle_checkin(Pid, State) ->
     #state{supervisor = Sup,
@@ -314,21 +316,21 @@ handle_checkin(Pid, State) ->
            monitors = Monitors,
            overflow = Overflow,
            strategy = Strategy,
-           overflow_ttl = OverflowTtl} = State,
+           overflow_ttl = OverflowTTL} = State,
     case queue:out(Waiting) of
         {{value, {From, CRef, MRef}}, Left} ->
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             gen_server:reply(From, Pid),
             State#state{waiting = Left};
-        {empty, Empty} when Overflow > 0, OverflowTtl > 0 ->
-            LastUseTime = erlang:monotonic_time(micro_seconds),
+        {empty, Empty} when Overflow > 0, OverflowTTL > 0 ->
+            LastUseTime = erlang:monotonic_time(milli_seconds),
             Workers = return_worker(Strategy, {Pid, LastUseTime}, State#state.workers),
             State#state{workers = Workers, waiting = Empty};
         {empty, Empty} when Overflow > 0 ->
             ok = dismiss_worker(Sup, Pid),
             State#state{waiting = Empty, overflow = Overflow - 1};
         {empty, Empty} ->
-            LastUseTime = erlang:monotonic_time(micro_seconds),
+            LastUseTime = erlang:monotonic_time(milli_seconds),
             Workers = return_worker(Strategy, {Pid, LastUseTime}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, overflow = 0}
     end.
@@ -347,7 +349,7 @@ handle_worker_exit(Pid, State) ->
             State#state{overflow = Overflow - 1, waiting = Empty};
         {empty, Empty} ->
             Workers =
-                [{new_worker(Sup), erlang:monotonic_time(micro_seconds)}
+                [{new_worker(Sup), erlang:monotonic_time(milli_seconds)}
                  | lists:filter(fun (P) -> P =/= Pid end, State#state.workers)],
             State#state{workers = Workers, waiting = Empty}
     end.
@@ -392,10 +394,13 @@ do_reap_workers([Worker = {Pid, LTime} | Rest], Now, TTL, Overflow, Sup, Workers
             do_reap_workers(Rest, Now, TTL, Overflow, Sup, [Worker | Workers], Strategy)
     end.
 
-start_timer(#state{overflow_ttl = 0}) -> %overflow turned off
+start_reap_timer(#state{overflow_ttl = 0}) -> %overflow turned off
     ok;
-start_timer(#state{overflow_check_period = TimerTTL}) when is_number(TimerTTL) ->
-    erlang:send_after(TimerTTL, self(), {rip_workers, TimerTTL});
-start_timer(#state{overflow_check_period = undefined, overflow_ttl = TTL}) ->
-    TimerTTL = round(min(TTL, ?CHECK_OVERFLOW_DEFAULT_PERIOD) / 1000), %If overflow_ttl is less, than a second - period will be same as overflow_ttl
-    erlang:send_after(TimerTTL, self(), {rip_workers, TimerTTL}).
+start_reap_timer(#state{overflow_check_period = CheckPeriod}) when is_number
+(CheckPeriod) ->
+    erlang:send_after(CheckPeriod, self(), {reap_workers, CheckPeriod});
+start_reap_timer(#state{overflow_check_period = undefined, overflow_ttl =
+OverflowTTL}) ->
+    CheckPeriod = round(min(OverflowTTL, ?CHECK_OVERFLOW_DEFAULT_PERIOD)), %If
+    %% overflow_ttl is less, than a second - period will be same as overflow_ttl
+    erlang:send_after(CheckPeriod, self(), {reap_workers, CheckPeriod}).
