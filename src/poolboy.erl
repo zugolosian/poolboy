@@ -31,13 +31,14 @@
     supervisor :: pid(),
     workers :: pid_queue(),
     waiting :: pid_queue(),
-    workers_to_reap :: ets:tid(),
+    workers_to_reap :: gb_trees:tree(),
     monitors :: ets:tid(),
     size = 5 :: non_neg_integer(),
     overflow = 0 :: non_neg_integer(),
     max_overflow = 10 :: non_neg_integer(),
     strategy = lifo :: lifo | fifo,
-    overflow_ttl = 0 :: non_neg_integer()
+    overflow_ttl = 0 :: non_neg_integer(),
+    overflow_reap_timer :: reference()
 }).
 
 init({PoolArgs, WorkerArgs}) ->
@@ -192,24 +193,25 @@ handle_call({checkout, CRef, Block}, {FromPid, _} = From, State) ->
            workers = Workers,
            monitors = Monitors,
            overflow = Overflow,
-           max_overflow = MaxOverflow} = State,
-    case queue:out(Workers) of
-        {{value, Pid}, Left} when State#state.overflow_ttl > 0 ->
+           max_overflow = MaxOverflow,
+           strategy = Strategy} = State,
+    case poolboy_queue:get_with_strategy(Workers, Strategy) of
+        {_MonotonicTime, Pid, Left} when State#state.overflow_ttl > 0 ->
             MRef = erlang:monitor(process, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             ok = cancel_worker_reap(State, Pid),
             {reply, Pid, State#state{workers = Left}};
-        {{value, Pid}, Left} ->
+        {_MonotonicTime, Pid, Left} ->
             MRef = erlang:monitor(process, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             {reply, Pid, State#state{workers = Left}};
-        {empty, _Empty} when MaxOverflow > 0, Overflow < MaxOverflow ->
+        {empty} when MaxOverflow > 0, Overflow < MaxOverflow ->
             {Pid, MRef} = new_worker(Sup, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             {reply, Pid, State#state{overflow = Overflow + 1}};
-        {empty, _Empty} when Block =:= false ->
+        {empty} when Block =:= false ->
             {reply, full, State};
-        {empty, _Empty} ->
+        {empty} ->
             MRef = erlang:monitor(process, FromPid),
             Waiting = queue:in({From, CRef, MRef}, State#state.waiting),
             {noreply, State#state{waiting = Waiting}}
@@ -221,7 +223,7 @@ handle_call(status, _From, State) ->
            overflow = Overflow} = State,
     CheckedOutWorkers = ets:info(Monitors, size),
     StateName = state_name(State),
-    {reply, {StateName, queue:len(Workers), Overflow, CheckedOutWorkers}, State};
+    {reply, {StateName, poolboy_queue:length(Workers), Overflow, CheckedOutWorkers}, State};
 handle_call(full_status, _From, State) ->
     #state{workers = Workers,
         size = Size,
@@ -238,7 +240,7 @@ handle_call(full_status, _From, State) ->
             % The maximum amount of worker is size + overflow_size
 
             {total_worker_count, length(supervisor:which_children(Sup))}, % The total of all workers
-            {ready_worker_count, queue:len(Workers)}, % Number of workers ready to use
+            {ready_worker_count, poolboy_queue:length(Workers)}, % Number of workers ready to use
             {overflow_worker_count, Overflow}, % Number of overflow workers
             {checked_out_worker_count, CheckedOutWorkers}, % Number of workers currently checked out
             {waiting_request_count, queue:len(Waiting)} % Number of waiting requests
@@ -284,13 +286,8 @@ handle_info({'EXIT', Pid, _Reason}, State) ->
             NewState = handle_worker_exit(Pid, State),
             {noreply, NewState};
         [] ->
-            case queue:member(Pid, Workers) of
-                true ->
-                    W = queue:filter(fun (P) -> P =/= Pid end, Workers),
-                    {noreply, State#state{workers = queue:in(new_worker(Sup) , W)}};
-                false ->
-                    {noreply, State}
-            end
+            W = poolboy_queue:delete_by_value(Pid, Workers),
+            {noreply, State#state{workers = poolboy_queue:put(erlang:monotonic_time(micro_seconds), new_worker(Sup), W)}}
     end;
 handle_info({reap_worker, Pid}, State)->
     #state{workers_to_reap = WorkersToReap} = State,
@@ -301,8 +298,8 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
-    Workers = queue:to_list(State#state.workers),
-    ok = lists:foreach(fun (W) -> unlink(W) end, Workers),
+    Workers = poolboy_queue:to_list(State#state.workers),
+    ok = lists:foreach(fun ({_Key, W}) -> unlink(W) end, Workers),
     true = exit(State#state.supervisor, shutdown),
     ok.
 
@@ -354,29 +351,29 @@ purge_worker(Pid, State) ->
            overflow = Overflow} = State,
     case Overflow > 0 of
         true ->
-            W = queue:filter(fun (P) -> P =/= Pid end, Workers),
+            W = poolboy_queue:delete_by_value(Pid, Workers),
             ok = dismiss_worker(Sup, Pid),
             State#state{workers = W, overflow = Overflow -1};
+
         false ->
             State
     end.
 
 prepopulate(N, _Sup) when N < 1 ->
-    queue:new();
+    poolboy_queue:new();
 prepopulate(N, Sup) ->
-    prepopulate(N, Sup, queue:new()).
+    prepopulate(N, Sup, poolboy_queue:new()).
 
 prepopulate(0, _Sup, Workers) ->
     Workers;
 prepopulate(N, Sup, Workers) ->
-    prepopulate(N-1, Sup, queue:in(new_worker(Sup), Workers)).
+    prepopulate(N-1, Sup, poolboy_queue:put(erlang:monotonic_time(micro_seconds), new_worker(Sup), Workers)).
 
 handle_checkin(Pid, State) ->
     #state{supervisor = Sup,
            waiting = Waiting,
            monitors = Monitors,
            overflow = Overflow,
-           strategy = Strategy,
            overflow_ttl = OverflowTtl,
            workers_to_reap = WorkersToReap} = State,
     case queue:out(Waiting) of
@@ -388,19 +385,13 @@ handle_checkin(Pid, State) ->
             Tref =
                 erlang:send_after(OverflowTtl, self(), {reap_worker, Pid}),
             true = ets:insert(WorkersToReap, {Pid, Tref}),
-            Workers = case Strategy of
-                          lifo -> queue:in_r(Pid, State#state.workers);
-                          fifo -> queue:in(Pid, State#state.workers)
-                      end,
+            Workers = poolboy_queue:put(erlang:monotonic_time(micro_seconds), Pid, State#state.workers),
             State#state{workers = Workers, waiting = Empty};
         {empty, Empty} when Overflow > 0 ->
             ok = dismiss_worker(Sup, Pid),
             State#state{waiting = Empty, overflow = Overflow - 1};
         {empty, Empty} ->
-            Workers = case Strategy of
-                lifo -> queue:in_r(Pid, State#state.workers);
-                fifo -> queue:in(Pid, State#state.workers)
-            end,
+            Workers = poolboy_queue:put(erlang:monotonic_time(micro_seconds), Pid, State#state.workers),
             State#state{workers = Workers, waiting = Empty, overflow = 0}
     end.
 
@@ -417,22 +408,21 @@ handle_worker_exit(Pid, State) ->
         {empty, Empty} when Overflow > 0 ->
             State#state{overflow = Overflow - 1, waiting = Empty};
         {empty, Empty} ->
-            Workers = queue:in(
-                new_worker(Sup)
-                 , queue:filter(fun (P) -> P =/= Pid end, State#state.workers)),
+            Workers = poolboy_queue:put(erlang:monotonic_time(micro_seconds), new_worker(Sup),
+                poolboy_queue:delete_by_value(Pid, State#state.workers)),
             State#state{workers = Workers, waiting = Empty}
     end.
 
 state_name(State = #state{overflow = Overflow}) when Overflow < 1 ->
     #state{max_overflow = MaxOverflow, workers = Workers} = State,
-    case queue:len(Workers) == 0 of
+    case poolboy_queue:length(Workers) == 0 of
         true when MaxOverflow < 1 -> full;
         true -> overflow;
         false -> ready
     end;
 state_name(State = #state{overflow = Overflow}) when Overflow > 0 ->
     #state{max_overflow = MaxOverflow, workers = Workers, overflow = Overflow} = State,
-    NumberOfWorkers = queue:len(Workers),
+    NumberOfWorkers = poolboy_queue:length(Workers),
     case MaxOverflow == Overflow of
         true when NumberOfWorkers > 0 -> ready;
         true -> full;
