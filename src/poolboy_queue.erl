@@ -77,9 +77,9 @@ to_list(Queue) ->
     gb_trees:to_list(Queue).
 
 value_member(Value, Queue) ->
-    Iterable = gb_trees:to_list(Queue),
+    Iterable = gb_trees:iterator(Queue),
     value_member1(Value, Iterable).
-value_member1(Value, [{Key,Item}|_Rest]) when Value == Item ->
+value_member1(Value, [{Key,Item, _, _}|_Rest]) when Value == Item ->
     {Key, Item};
 value_member1(Value, [_|Rest]) ->
     value_member1(Value, Rest);
