@@ -15,8 +15,8 @@
 new() ->
     gb_trees:empty().
 
-put(MonotonicTime, Item, Queue) ->
-    gb_trees:insert(MonotonicTime, Item, Queue).
+put(Priority, Item, Queue) ->
+    gb_trees:insert(Priority, Item, Queue).
 
 get(Queue) ->
     case gb_trees:is_empty(Queue) of
@@ -46,13 +46,28 @@ get_with_strategy(Queue, fifo) ->
     poolboy_queue:get(Queue).
 
 peek(Queue) ->
-    gb_trees:smallest(Queue).
+    case gb_trees:is_empty(Queue) of
+        true ->
+            {empty, Queue};
+        false ->
+            gb_trees:smallest(Queue)
+    end.
 
 peek_r(Queue) ->
-    gb_trees:largest(Queue).
+    case gb_trees:is_empty(Queue) of
+        true ->
+            {empty, Queue};
+        false ->
+            gb_trees:largest(Queue)
+    end.
 
 delete(Key, Queue) ->
-    gb_trees:delete(Key, Queue).
+    case gb_trees:is_defined(Key, Queue) of
+        true ->
+            gb_trees:delete(Key, Queue);
+        false ->
+            Queue
+    end.
 
 delete_by_value(Value, Queue) ->
     case value_member(Value, Queue) of
