@@ -365,7 +365,7 @@ purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, su
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup, overflow_reap_timer = OverflowTimer}) when Overflow > 1 ->
     W = poolboy_priority_queue:delete(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
-    {{Time, OrigCounter}, OldestWorker} = poolboy_priority_queue:peek(Workers),
+    {{Time, OrigCounter}, OldestWorker} = poolboy_priority_queue:peek(W),
     ReapTime = Time + State#state.overflow_ttl,
     erlang:cancel_timer(OverflowTimer),
     ReapTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker, {Time, OrigCounter}}, [{abs, true}]),
