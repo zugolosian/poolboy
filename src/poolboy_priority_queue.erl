@@ -6,11 +6,11 @@
 %%% @end
 %%% Created : 22. Jun 2018 11:04 AM
 %%%-------------------------------------------------------------------
--module(poolboy_queue).
+-module(poolboy_priority_queue).
 -author("davidleach").
 
 %% API
--export([new/0,put/3,get/1,get/2,get_with_strategy/2,get_r/1,get_r/2,peek/1,peek_r/1,drop/1,drop_r/1,length/1,lookup_by_value/2,delete/2,delete_by_value/2,to_list/1,get_by_value/2]).
+-export([new/0,put/3,get/1,get/2,get_with_strategy/2,get_r/1,get_r/2,peek/1,peek_r/1,length/1,lookup_by_value/2,delete/2,delete_by_value/2,to_list/1]).
 
 new() ->
     gb_trees:empty().
@@ -23,7 +23,7 @@ get(Queue) ->
         true ->
             {empty};
         false ->
-            poolboy_queue:get(Queue, not_empty)
+            poolboy_priority_queue:get(Queue, not_empty)
     end.
 
 get(Queue, not_empty) ->
@@ -34,16 +34,16 @@ get_r(Queue) ->
         true ->
             {empty};
         false ->
-            poolboy_queue:get_r(Queue, not_empty)
+            poolboy_priority_queue:get_r(Queue, not_empty)
     end.
 
 get_r(Queue, not_empty) ->
     gb_trees:take_largest(Queue).
 
 get_with_strategy(Queue, lifo) ->
-    poolboy_queue:get_r(Queue);
+    poolboy_priority_queue:get_r(Queue);
 get_with_strategy(Queue, fifo) ->
-    poolboy_queue:get(Queue).
+    poolboy_priority_queue:get(Queue).
 
 peek(Queue) ->
     case gb_trees:is_empty(Queue) of
@@ -77,28 +77,11 @@ delete_by_value(Value, Queue) ->
             Queue
     end.
 
-drop(Queue) ->
-    {_Key, _Value, Queue2} = poolboy_queue:get(Queue),
-    Queue2.
-
-drop_r(Queue) ->
-    {_Key, _Value, Queue2} = poolboy_queue:get_r(Queue),
-    Queue2.
-
 length(Queue) ->
     gb_trees:size(Queue).
 
 to_list(Queue) ->
     gb_trees:to_list(Queue).
-
-get_by_value(Value, Queue) ->
-    case lookup_by_value(Value, Queue) of
-        {Key, _Value} ->
-            {Value, NewQueue} = gb_trees:take(Key, Queue),
-            {{Key, Value}, NewQueue};
-        {none} ->
-            {{none}, Queue}
-    end.
 
 lookup_by_value(Value, Queue) ->
     Iterable = gb_trees:iterator(Queue),
