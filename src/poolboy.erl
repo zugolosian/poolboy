@@ -461,12 +461,12 @@ state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when
     #state{workers = Workers} = State,
     case poolboy_queue:length(Workers) of
         NumberOfWorkers when NumberOfWorkers > 0 -> ready;
-        NumberOfWorkers -> full
+        _NumberOfWorkers -> full
     end;
 state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when Overflow < MaxOverflow->
     #state{workers = Workers} = State,
     case poolboy_queue:length(Workers) of
         NumberOfWorkers when NumberOfWorkers > 0 -> ready;
-        NumberOfWorkers -> overflow
+        _NumberOfWorkers -> overflow
     end.
 
