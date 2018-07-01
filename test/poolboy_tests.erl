@@ -18,6 +18,12 @@ pool_test_() ->
             {<<"Basic pool operations">>,
                 fun pool_startup/0
             },
+            {<<"Basic lifo load">>,
+                fun load_lifo/0
+            },
+            {<<"Basic fifo load">>,
+                fun load_fifo/0
+            },
             {<<"Pool overflow should work">>,
                 fun pool_overflow/0
             },
@@ -410,6 +416,21 @@ pool_full_nonblocking() ->
     ?assertEqual(10, length(pool_call(Pid, get_all_monitors))),
     ok = pool_call(Pid, stop).
 
+load_lifo() ->
+    {ok, Pid} = new_pool(10000,10000, lifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    ok = pool_call(Pid, stop).
+
+load_fifo() ->
+    {ok, Pid} = new_pool(10000,10000, fifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    ok = pool_call(Pid, stop).
+
+
 pool_overflow_ttl_full() ->
     {ok, Pid} = new_pool_with_overflow_ttl(1, 1, 1000),
     _Worker = poolboy:checkout(Pid),
@@ -539,7 +560,7 @@ pool_overflow_ttl_owner_death() ->
     ?assertEqual(2, length(pool_call(Pid, get_all_monitors))),
     % Worker should be reaped after it's owner dies at correct ttl
     timer:sleep(255),
-    ?assertEqual({overflow, 0, 0, 2}, poolboy:status(Pid)),
+    ?assertEqual({overflow, 0, 1, 2}, poolboy:status(Pid)),
     ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
     ok = pool_call(Pid, stop).
 

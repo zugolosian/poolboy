@@ -365,11 +365,15 @@ purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, su
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup, overflow_reap_timer = OverflowTimer}) when Overflow > 1 ->
     W = poolboy_priority_queue:delete(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
-    {{Time, OrigCounter}, OldestWorker} = poolboy_priority_queue:peek(W),
-    ReapTime = Time + State#state.overflow_ttl,
     erlang:cancel_timer(OverflowTimer),
-    ReapTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker, {Time, OrigCounter}}, [{abs, true}]),
-    State#state{workers = W, overflow = Overflow -1, overflow_reap_timer = ReapTimer};
+    case poolboy_priority_queue:peek(W) of
+        {{Time, OrigCounter}, OldestWorker} ->
+            ReapTime = Time + State#state.overflow_ttl,
+            ReapTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker, {Time, OrigCounter}}, [{abs, true}]),
+            State#state{workers = W, overflow = Overflow -1, overflow_reap_timer = ReapTimer};
+        {empty, _} ->
+            State#state{workers = W, overflow = Overflow -1}
+    end;
 purge_worker(_Pid, _Key, State) ->
     State.
 
@@ -434,7 +438,7 @@ handle_checked_out_worker_exit(Pid, State) ->
             State#state{workers = Workers, waiting = Empty, worker_counter = Counter + 1}
     end.
 
-handle_checked_in_worker_exit(State = #state{overflow = Overflow}, Pid) when Overflow > 0->
+handle_checked_in_worker_exit(State = #state{overflow = Overflow}, Pid) when Overflow > 0 ->
     #state{workers = Workers} = State,
     NewWorkers = poolboy_priority_queue:delete_by_value(Pid, Workers),
     {ok, ReapTiner} = reset_worker_reap(State#state{workers = NewWorkers}, Pid),
