@@ -10,7 +10,7 @@
 -author("davidleach").
 
 %% API
--export([new/0,put/3,get/1,get/2,get_with_strategy/2,get_r/1,get_r/2,peek/1,peek_r/1,drop/1,drop_r/1,length/1,value_member/2,delete/2,delete_by_value/2,to_list/1]).
+-export([new/0,put/3,get/1,get/2,get_with_strategy/2,get_r/1,get_r/2,peek/1,peek_r/1,drop/1,drop_r/1,length/1,lookup_by_value/2,delete/2,delete_by_value/2,to_list/1,get_by_value/2]).
 
 new() ->
     gb_trees:empty().
@@ -70,7 +70,7 @@ delete(Key, Queue) ->
     end.
 
 delete_by_value(Value, Queue) ->
-    case value_member(Value, Queue) of
+    case lookup_by_value(Value, Queue) of
         {Key, _Value} ->
             delete(Key, Queue);
         {none} ->
@@ -91,14 +91,23 @@ length(Queue) ->
 to_list(Queue) ->
     gb_trees:to_list(Queue).
 
-value_member(Value, Queue) ->
+get_by_value(Value, Queue) ->
+    case lookup_by_value(Value, Queue) of
+        {Key, _Value} ->
+            {Value, NewQueue} = gb_trees:take(Key, Queue),
+            {{Key, Value}, NewQueue};
+        {none} ->
+            {{none}, Queue}
+    end.
+
+lookup_by_value(Value, Queue) ->
     Iterable = gb_trees:iterator(Queue),
-    value_member1(Value, Iterable).
-value_member1(Value, [{Key,Item, _, _}|_Rest]) when Value == Item ->
+    lookup_by_value1(Value, Iterable).
+lookup_by_value1(Value, [{Key,Item, _, _}|_Rest]) when Value == Item ->
     {Key, Item};
-value_member1(Value, [_|Rest]) ->
-    value_member1(Value, Rest);
-value_member1(_Value, []) ->
+lookup_by_value1(Value, [_|Rest]) ->
+    lookup_by_value1(Value, Rest);
+lookup_by_value1(_Value, []) ->
     {none}.
 
 

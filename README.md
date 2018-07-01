@@ -175,7 +175,7 @@ Returns : {Status, Workers, Overflow, InUse}
             The ready atom indicates there are workers that are not checked out 
             ready. The full atom indicates all workers including overflow are 
             checked out. The overflow atom is used to describe the condition 
-            when all permanent workers are in use but there is overflow capacity 
+            when all permanent workers are in use but there is overflow capacity
             available.
 - `Workers`: Number of workers ready for use.
 - `Overflow`: Number of overflow workers started, should never exceed number 
