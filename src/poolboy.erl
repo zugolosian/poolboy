@@ -29,7 +29,7 @@
 
 -record(state, {
     supervisor :: pid(),
-    workers :: poolboy_priority_queue:pri_queue(),
+    workers :: queue:queue(),
     worker_counter = 0 :: non_neg_integer(),
     waiting :: pid_queue(),
     monitors :: ets:tid(),
@@ -193,24 +193,24 @@ handle_call({checkout, CRef, Block}, {FromPid, _} = From, State) ->
            overflow = Overflow,
            max_overflow = MaxOverflow,
            strategy = Strategy} = State,
-    case poolboy_priority_queue:get_with_strategy(Workers, Strategy) of
-        {_Key, Pid, Left} when State#state.overflow_ttl > 0 ->
+    case get_worker_with_strategy(Workers, Strategy) of
+        {{value, {{_Time, _Counter}, Pid}}, Left} when State#state.overflow_ttl > 0 ->
             MRef = erlang:monitor(process, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             NewState = State#state{workers = Left},
             {ok, Timer} = reset_worker_reap(NewState, Pid),
             {reply, Pid, NewState#state{overflow_reap_timer = Timer}};
-        {_Key, Pid, Left} ->
+        {{value, {{_Time, _Counter}, Pid}}, Left} ->
             MRef = erlang:monitor(process, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             {reply, Pid, State#state{workers = Left}};
-        {empty} when MaxOverflow > 0, Overflow < MaxOverflow ->
+        {empty, _Left} when MaxOverflow > 0, Overflow < MaxOverflow ->
             {Pid, MRef} = new_worker(Sup, FromPid),
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
             {reply, Pid, State#state{overflow = Overflow + 1}};
-        {empty} when Block =:= false ->
+        {empty, _Left} when Block =:= false ->
             {reply, full, State};
-        {empty} ->
+        {empty, _Left} ->
             MRef = erlang:monitor(process, FromPid),
             Waiting = queue:in({From, CRef, MRef}, State#state.waiting),
             {noreply, State#state{waiting = Waiting}}
@@ -222,7 +222,7 @@ handle_call(status, _From, State) ->
            overflow = Overflow} = State,
     CheckedOutWorkers = ets:info(Monitors, size),
     StateName = state_name(State),
-    {reply, {StateName, poolboy_priority_queue:length(Workers), Overflow, CheckedOutWorkers}, State};
+    {reply, {StateName, queue:len(Workers), Overflow, CheckedOutWorkers}, State};
 handle_call(full_status, _From, State) ->
     #state{workers = Workers,
         size = Size,
@@ -239,7 +239,7 @@ handle_call(full_status, _From, State) ->
             % The maximum amount of worker is size + overflow_size
 
             {total_worker_count, length(supervisor:which_children(Sup))}, % The total of all workers
-            {ready_worker_count, poolboy_priority_queue:length(Workers)}, % Number of workers ready to use
+            {ready_worker_count, queue:len(Workers)}, % Number of workers ready to use
             {overflow_worker_count, Overflow}, % Number of overflow workers
             {checked_out_worker_count, CheckedOutWorkers}, % Number of workers currently checked out
             {waiting_request_count, queue:len(Waiting)} % Number of waiting requests
@@ -292,8 +292,8 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
-    Workers = poolboy_priority_queue:to_list(State#state.workers),
-    ok = lists:foreach(fun ({_Key, W}) -> unlink(W) end, Workers),
+    Workers = queue:to_list(State#state.workers),
+    ok = lists:foreach(fun ({{_Time, _Counter}, Pid}) -> unlink(Pid) end, Workers),
     true = exit(State#state.supervisor, shutdown),
     ok.
 
@@ -340,12 +340,12 @@ reset_worker_reap(State = #state{workers = Workers, overflow_reap_timer = Overfl
     {ok, Result} = case is_reference(OverflowTimer) of
         true ->
             erlang:cancel_timer(OverflowTimer),
-            case  poolboy_priority_queue:peek(Workers) of
-                {{Time, OrigCounter}, OldestWorker} ->
+            case  queue:peek(Workers) of
+                {value, {{Time, OrigCounter}, OldestWorker}} ->
                     ReapTime = Time + State#state.overflow_ttl,
                     ReapTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker, {Time, OrigCounter}}, [{abs, true}]),
                     {ok, ReapTimer};
-                {empty, _Queue} ->
+                empty ->
                     {ok ,none}
             end;
         false ->
@@ -359,33 +359,33 @@ reset_worker_reap(State = #state{workers = Workers, overflow_reap_timer = Overfl
     end.
 
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup}) when Overflow == 1 ->
-    W = poolboy_priority_queue:delete(Key, Workers),
+    W = delete_worker(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
     State#state{workers = W, overflow = Overflow -1};
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup, overflow_reap_timer = OverflowTimer}) when Overflow > 1 ->
-    W = poolboy_priority_queue:delete(Key, Workers),
+    W = delete_worker(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
     erlang:cancel_timer(OverflowTimer),
-    case poolboy_priority_queue:peek(W) of
-        {{Time, OrigCounter}, OldestWorker} ->
+    case queue:peek(W) of
+        {value, {{Time, OrigCounter}, OldestWorker}} ->
             ReapTime = Time + State#state.overflow_ttl,
             ReapTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker, {Time, OrigCounter}}, [{abs, true}]),
             State#state{workers = W, overflow = Overflow -1, overflow_reap_timer = ReapTimer};
-        {empty, _} ->
+        empty ->
             State#state{workers = W, overflow = Overflow -1}
     end;
 purge_worker(_Pid, _Key, State) ->
     State.
 
 prepopulate(N, _Sup, _Counter) when N < 1 ->
-    poolboy_priority_queue:new();
+    queue:new();
 prepopulate(N, Sup, Counter) ->
-    prepopulate(N, Sup, poolboy_priority_queue:new(), Counter).
+    prepopulate(N, Sup, queue:new(), Counter).
 
 prepopulate(0, _Sup, Workers, _Counter) ->
     Workers;
 prepopulate(N, Sup, Workers, Counter) ->
-    prepopulate(N-1, Sup, poolboy_priority_queue:put({erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup), Workers), Counter + 1).
+    prepopulate(N-1, Sup, queue:in({{erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup)}, Workers), Counter + 1).
 
 set_reap_timer(Timer, _CurrentTime, _OverflowTtl, _Counter, _Pid) when is_reference(Timer) ->
     {timer, Timer};
@@ -409,13 +409,13 @@ handle_checkin(Pid, State) ->
         {empty, Empty} when Overflow > 0, OverflowTtl > 0 ->
             CurrentTime = erlang:monotonic_time(milli_seconds),
             {timer, Timer} = set_reap_timer(OverflowTimer, CurrentTime, OverflowTtl,  Counter + 1, Pid),
-            Workers = poolboy_priority_queue:put({CurrentTime, Counter + 1}, Pid, State#state.workers),
+            Workers = queue:in({{CurrentTime, Counter + 1}, Pid}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, worker_counter = Counter + 1, overflow_reap_timer = Timer};
         {empty, Empty} when Overflow > 0 ->
             ok = dismiss_worker(Sup, Pid),
             State#state{waiting = Empty, overflow = Overflow - 1};
         {empty, Empty} ->
-            Workers = poolboy_priority_queue:put({erlang:monotonic_time(milli_seconds), Counter + 1}, Pid, State#state.workers),
+            Workers = queue:in({{erlang:monotonic_time(milli_seconds), Counter + 1}, Pid}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, overflow = 0, worker_counter = Counter + 1}
     end.
 
@@ -433,40 +433,51 @@ handle_checked_out_worker_exit(Pid, State) ->
         {empty, Empty} when Overflow > 0 ->
             State#state{overflow = Overflow - 1, waiting = Empty};
         {empty, Empty} ->
-            W = poolboy_priority_queue:delete_by_value(Pid, State#state.workers),
-            Workers = poolboy_priority_queue:put({erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup), W),
+            W = delete_worker_by_pid(Pid, State#state.workers),
+            Workers = queue:in({{erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup)}, W),
             State#state{workers = Workers, waiting = Empty, worker_counter = Counter + 1}
     end.
 
 handle_checked_in_worker_exit(State = #state{overflow = Overflow}, Pid) when Overflow > 0 ->
     #state{workers = Workers} = State,
-    NewWorkers = poolboy_priority_queue:delete_by_value(Pid, Workers),
+    NewWorkers = delete_worker_by_pid(Pid, Workers),
     {ok, ReapTiner} = reset_worker_reap(State#state{workers = NewWorkers}, Pid),
     State#state{workers = NewWorkers, overflow_reap_timer = ReapTiner, overflow = Overflow - 1};
 handle_checked_in_worker_exit(State, Pid) ->
     #state{workers = Workers, worker_counter = Counter, supervisor = Sup} = State,
     % Have to remove the existing worker before resetting timer
-    FilteredWorkers = poolboy_priority_queue:delete_by_value(Pid, Workers),
-    NewWorkers = poolboy_priority_queue:put({erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup), FilteredWorkers),
+    FilteredWorkers = delete_worker_by_pid(Pid, Workers),
+    NewWorkers = queue:in({{erlang:monotonic_time(milli_seconds), Counter + 1}, new_worker(Sup)}, FilteredWorkers),
     {ok, ReapTiner} = reset_worker_reap(State#state{workers = NewWorkers}, Pid),
     State#state{workers = NewWorkers, overflow_reap_timer = ReapTiner}.
 
+get_worker_with_strategy(Workers, fifo) ->
+    queue:out(Workers);
+get_worker_with_strategy(Workers, lifo) ->
+    queue:out_r(Workers).
+
+delete_worker(Key, Workers) ->
+    queue:filter(fun ({ItemKey, _Pid}) -> ItemKey =/= Key end, Workers).
+
+delete_worker_by_pid(Pid, Workers) ->
+    queue:filter(fun ({_ItemKey, WPid}) -> WPid =/= Pid end, Workers).
+
 state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when Overflow < 1->
     #state{max_overflow = MaxOverflow, workers = Workers} = State,
-    case poolboy_priority_queue:length(Workers) == 0 of
+    case queue:len(Workers) == 0 of
         true when MaxOverflow < 1 -> full;
         true -> overflow;
         false -> ready
     end;
 state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when Overflow == MaxOverflow->
     #state{workers = Workers} = State,
-    case poolboy_priority_queue:length(Workers) of
+    case queue:len(Workers) of
         NumberOfWorkers when NumberOfWorkers > 0 -> ready;
         _NumberOfWorkers -> full
     end;
 state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when Overflow < MaxOverflow->
     #state{workers = Workers} = State,
-    case poolboy_priority_queue:length(Workers) of
+    case queue:len(Workers) of
         NumberOfWorkers when NumberOfWorkers > 0 -> ready;
         _NumberOfWorkers -> overflow
     end.
