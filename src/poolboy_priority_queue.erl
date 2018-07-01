@@ -10,56 +10,56 @@
 -author("davidleach").
 
 %% API
--export([new/0,put/3,get/1,get/2,get_with_strategy/2,get_r/1,get_r/2,peek/1,peek_r/1,length/1,lookup_by_value/2,delete/2,delete_by_value/2,to_list/1]).
+-export([new/0,put/3,get/1,get_with_strategy/2,get_r/1,peek/1,length/1,lookup_by_value/2,delete/2,delete_by_value/2,to_list/1]).
+
+-spec new() -> gb_trees:tree().
 
 new() ->
     gb_trees:empty().
 
+-spec put(Priority :: integer() | tuple(), Item :: term(), Queue :: gb_trees:tree(_,_)) ->
+    gb_trees:tree(_,_).
+
 put(Priority, Item, Queue) ->
     gb_trees:insert(Priority, Item, Queue).
 
+-spec get(gb_trees:tree(_,_)) -> {'empty'} | {_,_,gb_trees:tree(_,_)}.
 get(Queue) ->
     case gb_trees:is_empty(Queue) of
-        true ->
-            {empty};
         false ->
-            poolboy_priority_queue:get(Queue, not_empty)
+            gb_trees:take_smallest(Queue);
+        true ->
+            {empty}
     end.
 
-get(Queue, not_empty) ->
-    gb_trees:take_smallest(Queue).
-
+-spec get_r(gb_trees:tree(_,_)) -> {'empty'} | {_,_,gb_trees:tree(_,_)}.
 get_r(Queue) ->
     case gb_trees:is_empty(Queue) of
-        true ->
-            {empty};
         false ->
-            poolboy_priority_queue:get_r(Queue, not_empty)
+            gb_trees:take_largest(Queue);
+        true ->
+            {empty}
     end.
 
-get_r(Queue, not_empty) ->
-    gb_trees:take_largest(Queue).
+-spec get_with_strategy(Queue :: gb_trees:tree(_,_),'fifo' | 'lifo') ->
+    {'empty'} | {_,_,gb_trees:tree(_,_)}.
 
 get_with_strategy(Queue, lifo) ->
     poolboy_priority_queue:get_r(Queue);
 get_with_strategy(Queue, fifo) ->
     poolboy_priority_queue:get(Queue).
 
+-spec peek(gb_trees:tree(_,_)) -> {_,_}.
+
 peek(Queue) ->
     case gb_trees:is_empty(Queue) of
-        true ->
-            {empty, Queue};
         false ->
-            gb_trees:smallest(Queue)
+            gb_trees:smallest(Queue);
+        true ->
+            {empty, Queue}
     end.
 
-peek_r(Queue) ->
-    case gb_trees:is_empty(Queue) of
-        true ->
-            {empty, Queue};
-        false ->
-            gb_trees:largest(Queue)
-    end.
+-spec delete(_,gb_trees:tree(_,_)) -> gb_trees:tree(_,_).
 
 delete(Key, Queue) ->
     case gb_trees:is_defined(Key, Queue) of
@@ -69,29 +69,36 @@ delete(Key, Queue) ->
             Queue
     end.
 
+-spec delete_by_value(_,gb_trees:tree(_,_)) -> gb_trees:tree(_,_).
+
 delete_by_value(Value, Queue) ->
     case lookup_by_value(Value, Queue) of
-        {Key, _Value} ->
-            delete(Key, Queue);
         {none} ->
-            Queue
+            Queue;
+        {Key} ->
+            delete(Key, Queue)
+
     end.
+
+-spec length(gb_trees:tree(_,_)) -> non_neg_integer().
 
 length(Queue) ->
     gb_trees:size(Queue).
 
+-spec to_list(gb_trees:tree(_,_)) -> [{_,_}].
+
 to_list(Queue) ->
     gb_trees:to_list(Queue).
 
+-spec lookup_by_value(_,'none' | {_,_,_} | gb_trees:tree(_,_)) -> {_}.
+lookup_by_value(_Value, none) ->
+    {none};
+lookup_by_value(Value, {Key, Value, _Iterable}) ->
+    {Key};
+lookup_by_value(Value, {_Key, _Value, Iterable}) ->
+    lookup_by_value(Value, gb_trees:next(Iterable));
 lookup_by_value(Value, Queue) ->
-    Iterable = gb_trees:iterator(Queue),
-    lookup_by_value1(Value, Iterable).
-lookup_by_value1(Value, [{Key,Item, _, _}|_Rest]) when Value == Item ->
-    {Key, Item};
-lookup_by_value1(Value, [_|Rest]) ->
-    lookup_by_value1(Value, Rest);
-lookup_by_value1(_Value, []) ->
-    {none}.
+    lookup_by_value(Value, gb_trees:next(gb_trees:iterator(Queue))).
 
 
 
