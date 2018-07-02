@@ -24,6 +24,12 @@ pool_test_() ->
             {<<"Basic fifo load">>,
                 fun load_fifo/0
             },
+            {<<"Basic overflow_ttl load lifo">>,
+                fun load_overflow_ttl_lifo/0
+            },
+            {<<"Basic overflow_ttl load fifo">>,
+                fun load_overflow_ttl_fifo/0
+            },
             {<<"Pool overflow should work">>,
                 fun pool_overflow/0
             },
@@ -417,19 +423,32 @@ pool_full_nonblocking() ->
     ok = pool_call(Pid, stop).
 
 load_lifo() ->
-    {ok, Pid} = new_pool(10000,10000, lifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    {ok, Pid} = new_pool(20000,20000, lifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
     ok = pool_call(Pid, stop).
 
 load_fifo() ->
-    {ok, Pid} = new_pool(10000,10000, fifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    {ok, Pid} = new_pool(20000,20000, fifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
     ok = pool_call(Pid, stop).
 
+load_overflow_ttl_lifo() ->
+    {ok, Pid} = new_pool_with_overflow_ttl_strategy(20000,20000, 2000, lifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    ok = pool_call(Pid, stop).
+
+load_overflow_ttl_fifo() ->
+    {ok, Pid} = new_pool_with_overflow_ttl_strategy(20000,20000, 2000, fifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    ok = pool_call(Pid, stop).
 
 pool_overflow_ttl_full() ->
     {ok, Pid} = new_pool_with_overflow_ttl(1, 1, 1000),
@@ -788,6 +807,12 @@ new_pool_with_overflow_ttl(Size, MaxOverflow, OverflowTtl) ->
         {worker_module, poolboy_test_worker},
         {size, Size}, {max_overflow, MaxOverflow},
         {overflow_ttl, OverflowTtl}]).
+
+new_pool_with_overflow_ttl_strategy(Size, MaxOverflow, OverflowTtl, Strategy) ->
+    poolboy:start_link([{name, {local, poolboy_test}},
+        {worker_module, poolboy_test_worker},
+        {size, Size}, {max_overflow, MaxOverflow},
+        {overflow_ttl, OverflowTtl},{strategy, Strategy}]).
 
 pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).

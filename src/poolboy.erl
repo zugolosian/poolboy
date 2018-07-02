@@ -361,7 +361,7 @@ reset_worker_reap(State = #state{workers = Workers, overflow_reap_timer = Overfl
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup}) when Overflow == 1 ->
     W = delete_worker(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
-    State#state{workers = W, overflow = Overflow -1};
+    State#state{workers = W, overflow = Overflow -1, overflow_reap_timer = none};
 purge_worker(Pid, Key, State = #state{overflow = Overflow, workers = Workers, supervisor = Sup, overflow_reap_timer = OverflowTimer}) when Overflow > 1 ->
     W = delete_worker(Key, Workers),
     ok = dismiss_worker(Sup, Pid),
