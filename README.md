@@ -198,6 +198,8 @@ for graphing the state of your pools
 - `overflow_worker_count`: The count of active overflow workers
 - `waiting_request_count`: The backlog of requests waiting to checkout
     a worker
+- `total_workers_started`: The total number of workers started since the pool
+    started, good for measuring worker churn
 
 
 ## Authors

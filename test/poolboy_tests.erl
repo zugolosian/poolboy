@@ -647,31 +647,31 @@ pool_returns_status() ->
 
 pool_returns_full_status() ->
     {ok, Pool} = new_pool(2, 0),
-    ?assertEqual(full_status(2,0,2,2,0,0,0), poolboy:full_status(Pool)),
+    ?assertEqual(full_status(2,0,2,2,0,0,0,2), poolboy:full_status(Pool)),
     poolboy:checkout(Pool),
-    ?assertEqual(full_status(2,0,2,1,0,1,0), poolboy:full_status(Pool)),
+    ?assertEqual(full_status(2,0,2,1,0,1,0,2), poolboy:full_status(Pool)),
     poolboy:checkout(Pool),
-    ?assertEqual(full_status(2,0,2,0,0,2,0), poolboy:full_status(Pool)),
+    ?assertEqual(full_status(2,0,2,0,0,2,0,2), poolboy:full_status(Pool)),
     ok = pool_call(Pool, stop),
 
     {ok, Pool2} = new_pool(1, 1),
-    ?assertEqual(full_status(1,1,1,1,0,0,0), poolboy:full_status(Pool2)),
+    ?assertEqual(full_status(1,1,1,1,0,0,0,1), poolboy:full_status(Pool2)),
     poolboy:checkout(Pool2),
-    ?assertEqual(full_status(1,1,1,0,0,1,0), poolboy:full_status(Pool2)),
+    ?assertEqual(full_status(1,1,1,0,0,1,0,1), poolboy:full_status(Pool2)),
     poolboy:checkout(Pool2),
-    ?assertEqual(full_status(1,1,2,0,1,2,0), poolboy:full_status(Pool2)),
+    ?assertEqual(full_status(1,1,2,0,1,2,0,2), poolboy:full_status(Pool2)),
     ok = pool_call(Pool2, stop),
 
     {ok, Pool3} = new_pool(0, 2),
-    ?assertEqual(full_status(0,2,0,0,0,0,0), poolboy:full_status(Pool3)),
+    ?assertEqual(full_status(0,2,0,0,0,0,0,0), poolboy:full_status(Pool3)),
     poolboy:checkout(Pool3),
-    ?assertEqual(full_status(0,2,1,0,1,1,0), poolboy:full_status(Pool3)),
+    ?assertEqual(full_status(0,2,1,0,1,1,0,1), poolboy:full_status(Pool3)),
     poolboy:checkout(Pool3),
-    ?assertEqual(full_status(0,2,2,0,2,2,0), poolboy:full_status(Pool3)),
+    ?assertEqual(full_status(0,2,2,0,2,2,0,2), poolboy:full_status(Pool3)),
     ok = pool_call(Pool3, stop),
 
     {ok, Pool4} = new_pool(0, 0),
-    ?assertEqual(full_status(0,0,0,0,0,0,0), poolboy:full_status(Pool4)),
+    ?assertEqual(full_status(0,0,0,0,0,0,0,0), poolboy:full_status(Pool4)),
     ok = pool_call(Pool4, stop),
 
     % Check that the wait queue is showing correct amount
@@ -690,7 +690,7 @@ pool_returns_full_status() ->
     after
         500 -> ?assert(true)
     end,
-    ?assertEqual(full_status(1,0,1,0,0,1,1), poolboy:full_status(Pool5)),
+    ?assertEqual(full_status(1,0,1,0,0,1,1,1), poolboy:full_status(Pool5)),
     checkin_worker(Pool5, Checkout1),
 
     %% Spawned process should have been able to obtain a worker.
@@ -699,7 +699,7 @@ pool_returns_full_status() ->
     after
         500 -> ?assert(false)
     end,
-    ?assertEqual(full_status(1,0,1,1,0,0,0), poolboy:full_status(Pool5)),
+    ?assertEqual(full_status(1,0,1,1,0,0,0,1), poolboy:full_status(Pool5)),
     ok = pool_call(Pool5, stop).
 
 demonitors_previously_waiting_processes() ->
@@ -818,7 +818,7 @@ pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).
 
 full_status(Size, MaxOverFlow, TotalWorker, ReadyWorker, OverflowWorker,
-    CheckedOutWorker, Waiting) ->
+    CheckedOutWorker, Waiting, WorkersStarted) ->
     % Helper function to populate the results tuple
     [{size, Size},
      {max_overflow, MaxOverFlow},
@@ -826,5 +826,6 @@ full_status(Size, MaxOverFlow, TotalWorker, ReadyWorker, OverflowWorker,
      {ready_worker_count, ReadyWorker},
      {overflow_worker_count, OverflowWorker},
      {checked_out_worker_count, CheckedOutWorker},
-     {waiting_request_count, Waiting}
+     {waiting_request_count, Waiting},
+     {total_workers_started, WorkersStarted}
     ].
