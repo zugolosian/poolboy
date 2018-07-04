@@ -78,6 +78,10 @@ pool_test_() ->
             {<<"Pool behaves on owner death">>,
                 fun owner_death/0
             },
+            {<<"When worker_checkin callback exists and it's set to kill on owner death ensure that when using
+            overflow_ttl the worker is killed early">>,
+                fun checkin_callback_kill_on_owner_death/0
+            },
             {<<"Worker checked-in after an exception in a transaction">>,
                 fun checkin_after_exception_in_transaction/0
             },
@@ -423,31 +427,31 @@ pool_full_nonblocking() ->
     ok = pool_call(Pid, stop).
 
 load_lifo() ->
-    {ok, Pid} = new_pool(20000,20000, lifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    {ok, Pid} = new_pool(10000,10000, lifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     ok = pool_call(Pid, stop).
 
 load_fifo() ->
-    {ok, Pid} = new_pool(20000,20000, fifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    {ok, Pid} = new_pool(10000,10000, fifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     ok = pool_call(Pid, stop).
 
 load_overflow_ttl_lifo() ->
-    {ok, Pid} = new_pool_with_overflow_ttl_strategy(20000,20000, 2000, lifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    {ok, Pid} = new_pool_with_overflow_ttl_strategy(10000,10000, 2000, lifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     ok = pool_call(Pid, stop).
 
 load_overflow_ttl_fifo() ->
-    {ok, Pid} = new_pool_with_overflow_ttl_strategy(20000,20000, 2000, fifo),
-    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    {ok, Pid} = new_pool_with_overflow_ttl_strategy(10000,10000, 2000, fifo),
+    Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     lists:foreach(fun(Worker) -> poolboy:checkin(Pid, Worker) end, Workers),
-    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 39999)],
+    _Workers2 = [poolboy:checkout(Pid) || _ <- lists:seq(0, 19999)],
     ok = pool_call(Pid, stop).
 
 pool_overflow_ttl_full() ->
@@ -583,8 +587,6 @@ pool_overflow_ttl_owner_death() ->
     ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
     ok = pool_call(Pid, stop).
 
-
-
 owner_death() ->
     %% Check that a dead owner (a process that dies with a worker checked out)
     %% causes the pool to dismiss the worker and prune the state space.
@@ -597,6 +599,35 @@ owner_death() ->
     ?assertEqual(5, queue:len(pool_call(Pid, get_avail_workers))),
     ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
     ?assertEqual(0, length(pool_call(Pid, get_all_monitors))),
+
+    ok = pool_call(Pid, stop).
+
+checkin_callback_kill_on_owner_death() ->
+    %% Check that a dead owner (a process that dies with a worker checked out)
+    %% causes the pool to dismiss the worker and prune the state space.
+    {ok, Pid} = new_pool_with_callback_worker(5, 5, 2000),
+    spawn(fun() ->
+        poolboy:checkout(Pid),
+        receive after 500 -> exit(normal) end
+          end),
+    timer:sleep(750),
+    ?assertEqual(5, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(0, length(pool_call(Pid, get_all_monitors))),
+
+    _Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 4)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    spawn(fun() ->
+        poolboy:checkout(Pid),
+        receive after 500 -> exit(normal) end
+          end),
+    % Give it time to checkout
+    timer:sleep(75),
+    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    %% Check that the presence of the callback decides to purge the worker early
+    timer:sleep(500),
+    ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ok = pool_call(Pid, stop).
 
 checkin_after_exception_in_transaction() ->
@@ -813,6 +844,12 @@ new_pool_with_overflow_ttl_strategy(Size, MaxOverflow, OverflowTtl, Strategy) ->
         {worker_module, poolboy_test_worker},
         {size, Size}, {max_overflow, MaxOverflow},
         {overflow_ttl, OverflowTtl},{strategy, Strategy}]).
+
+new_pool_with_callback_worker(Size, MaxOverflow, OverflowTtl) ->
+    poolboy:start_link([{name, {local, poolboy_test}},
+        {worker_module, poolboy_test_worker_checkin_callback},
+        {size, Size}, {max_overflow, MaxOverflow},
+        {overflow_ttl, OverflowTtl}]).
 
 pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).

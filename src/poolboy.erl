@@ -38,7 +38,8 @@
     max_overflow = 10 :: non_neg_integer(),
     strategy = lifo :: lifo | fifo,
     overflow_ttl = 0 :: non_neg_integer(),
-    reap_timer = none
+    reap_timer = none,
+    checkin_callback :: boolean()
 }).
 
 init({PoolArgs, WorkerArgs}) ->
@@ -48,8 +49,10 @@ init({PoolArgs, WorkerArgs}) ->
     init(PoolArgs, WorkerArgs, #state{waiting = Waiting, monitors = Monitors}).
 
 init([{worker_module, Mod} | Rest], WorkerArgs, State) when is_atom(Mod) ->
+    code:ensure_loaded(Mod),
+    CheckinCallback = set_checkin_callback(Mod),
     {ok, Sup} = poolboy_sup:start_link(Mod, WorkerArgs),
-    init(Rest, WorkerArgs, State#state{supervisor = Sup});
+    init(Rest, WorkerArgs, State#state{supervisor = Sup, checkin_callback = CheckinCallback});
 init([{size, Size} | Rest], WorkerArgs, State) when is_integer(Size) ->
     init(Rest, WorkerArgs, State#state{size = Size});
 init([{max_overflow, MaxOverflow} | Rest], WorkerArgs, State) when is_integer(MaxOverflow) ->
@@ -64,6 +67,7 @@ init([_ | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State);
 init([], _WorkerArgs, #state{size = Size, supervisor = Sup, total_workers_started = Counter} = State) ->
     Workers = prepopulate(Size, Sup, Counter),
+    % Have to set the
     {ok, State#state{workers = Workers, total_workers_started = Size}}.
 
 -spec checkout(Pool :: pool()) -> pid().
@@ -159,7 +163,8 @@ handle_cast({checkin, Pid}, State = #state{monitors = Monitors}) ->
         [{Pid, _, MRef}] ->
             true = erlang:demonitor(MRef),
             true = ets:delete(Monitors, Pid),
-            NewState = handle_checkin(Pid, State),
+            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, normal),
+            NewState = handle_checkin(Pid, State, Kill),
             {noreply, NewState};
         [] ->
             {noreply, State}
@@ -170,7 +175,8 @@ handle_cast({cancel_waiting, CRef}, State) ->
         [[Pid, MRef]] ->
             demonitor(MRef, [flush]),
             true = ets:delete(State#state.monitors, Pid),
-            NewState = handle_checkin(Pid, State),
+            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, normal),
+            NewState = handle_checkin(Pid, State, Kill),
             {noreply, NewState};
         [] ->
             Cancel = fun({_, Ref, MRef}) when Ref =:= CRef ->
@@ -270,7 +276,8 @@ handle_info({'DOWN', MRef, _, _, _}, State) ->
     case ets:match(State#state.monitors, {'$1', '_', MRef}) of
         [[Pid]] ->
             true = ets:delete(State#state.monitors, Pid),
-            NewState = handle_checkin(Pid, State),
+            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, owner_death),
+            NewState = handle_checkin(Pid, State, Kill),
             {noreply, NewState};
         [] ->
             Waiting = queue:filter(fun ({_, _, R}) -> R =/= MRef end, State#state.waiting),
@@ -289,7 +296,7 @@ handle_info({'EXIT', Pid, _Reason}, State) ->
             {noreply, NewState}
     end;
 handle_info({reap_worker, Pid}, State)->
-    NewState = purge_worker(Pid, State),
+    NewState = reap_worker(Pid, State),
     {noreply, NewState};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -311,100 +318,26 @@ start_pool(StartFun, PoolArgs, WorkerArgs) ->
             gen_server:StartFun(Name, ?MODULE, {PoolArgs, WorkerArgs}, [])
     end.
 
-new_worker(Sup) ->
-    {ok, Pid} = supervisor:start_child(Sup, []),
-    true = link(Pid),
-    Pid.
-
-new_worker(Sup, FromPid) ->
-    Pid = new_worker(Sup),
-    Ref = erlang:monitor(process, FromPid),
-    {Pid, Ref}.
-
-dismiss_worker(Sup, Pid) ->
-    true = unlink(Pid),
-    supervisor:terminate_child(Sup, Pid).
-
-reset_worker_reap(#state{overflow = Overflow, reap_timer = ReapTimer} = _State, Pid) when Overflow == 0, is_reference(ReapTimer) ->
-    erlang:cancel_timer(ReapTimer),
-    receive
-        {reap_worker, Pid} ->
-            {ok, none}
-    after 0 ->
-        {ok, none}
-    end;
-reset_worker_reap(#state{reap_timer = ReapTimer, overflow = Overflow} = State, Pid) when Overflow > 0, is_reference(ReapTimer) ->
-    #state{workers = Workers,
-        overflow_ttl = OverflowTtl} = State,
-    erlang:cancel_timer(ReapTimer),
-    Timer = reset_reap_timer(Workers, ReapTimer, OverflowTtl),
-    receive
-        {reap_worker, Pid} ->
-            {ok, Timer}
-    after 0 ->
-        {ok, Timer}
-    end;
-reset_worker_reap(_State, Pid) ->
-    receive
-        {reap_worker, Pid} ->
-            {ok, none}
-    after 0 ->
-        {ok, none}
-    end.
-
-purge_worker(Pid, #state{overflow = Overflow} = State) when Overflow == 1 ->
-    #state{workers = Workers,
-        supervisor = Sup} = State,
-    W = delete_worker_by_pid(Pid, Workers),
-    ok = dismiss_worker(Sup, Pid),
-    State#state{workers = W, overflow = Overflow -1, reap_timer = none};
-purge_worker(Pid, State = #state{overflow = Overflow}) when Overflow > 1 ->
-    #state{workers = Workers,
-        supervisor = Sup,
-        reap_timer = ReapTimer,
-        overflow_ttl = OverflowTtl} = State,
-    W = delete_worker_by_pid(Pid, Workers),
-    ok = dismiss_worker(Sup, Pid),
-    erlang:cancel_timer(ReapTimer),
-    Timer = reset_reap_timer(W, ReapTimer, OverflowTtl),
-    State#state{workers = W, overflow = Overflow -1, reap_timer = Timer};
-purge_worker(_Pid, State) ->
-    State.
-
-prepopulate(N, _Sup, _Counter) when N < 1 ->
-    queue:new();
-prepopulate(N, Sup, Counter) ->
-    prepopulate(N, Sup, queue:new(), Counter).
-
-prepopulate(0, _Sup, Workers, _Counter) ->
-    Workers;
-prepopulate(N, Sup, Workers, Counter) ->
-    prepopulate(N-1, Sup, queue:in({erlang:monotonic_time(milli_seconds), new_worker(Sup)}, Workers), Counter + 1).
-
-set_reap_timer(ReapTimer, _CurrentTime, _OverflowTtl, _Pid) when is_reference(ReapTimer) ->
-    {timer, ReapTimer};
-set_reap_timer(_ReapTimer, CurrentTime, OverflowTtl, Pid) ->
-    ReapTimer = erlang:send_after(CurrentTime + OverflowTtl, self(), {reap_worker, Pid}, [{abs, true}]),
-    {timer, ReapTimer}.
-
-reset_reap_timer(Workers, ReapTimer, OverflowTtl)->
-    erlang:cancel_timer(ReapTimer),
-    case queue:peek(Workers) of
-        {value, {Time, OldestWorker}} ->
-            ReapTime = Time + OverflowTtl,
-            Timer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker}, [{abs, true}]),
-            Timer;
-        empty ->
+set_checkin_callback(Module) ->
+    case erlang:function_exported(Module, worker_checkin, 2) of
+        true ->
+            fun Module:worker_checkin/2;
+        false ->
             none
     end.
 
-handle_checkin(Pid, State) ->
+handle_checkin_callback(none, _Pid, _Reason) ->
+    keep;
+handle_checkin_callback(Function, Pid, Reason) ->
+    Function(Pid, Reason).
+
+handle_checkin(Pid, State, keep) ->
     #state{supervisor = Sup,
-           waiting = Waiting,
-           monitors = Monitors,
-           overflow = Overflow,
-           overflow_ttl = OverflowTtl,
-           reap_timer = ReapTimer} = State,
+        waiting = Waiting,
+        monitors = Monitors,
+        overflow = Overflow,
+        overflow_ttl = OverflowTtl,
+        reap_timer = ReapTimer} = State,
     case queue:out(Waiting) of
         {{value, {From, CRef, MRef}}, Left} ->
             true = ets:insert(Monitors, {Pid, CRef, MRef}),
@@ -412,7 +345,7 @@ handle_checkin(Pid, State) ->
             State#state{waiting = Left};
         {empty, Empty} when Overflow > 0, OverflowTtl > 0 ->
             CurrentTime = erlang:monotonic_time(milli_seconds),
-            {timer, Timer} = set_reap_timer(ReapTimer, CurrentTime, OverflowTtl, Pid),
+            {ok, Timer} = set_reap_timer(ReapTimer, CurrentTime, OverflowTtl, Pid),
             Workers = queue:in({CurrentTime, Pid}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, reap_timer = Timer};
         {empty, Empty} when Overflow > 0 ->
@@ -421,13 +354,26 @@ handle_checkin(Pid, State) ->
         {empty, Empty} ->
             Workers = queue:in({erlang:monotonic_time(milli_seconds), Pid}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, overflow = 0}
-    end.
+    end;
+handle_checkin(Pid, #state{overflow = Overflow, overflow_ttl = OverflowTtl} = State, kill) when Overflow > 0, OverflowTtl > 0 ->
+    reap_worker(Pid, State);
+handle_checkin(Pid, #state{overflow = Overflow} = State, kill) when Overflow > 0 ->
+    #state{supervisor = Sup} = State,
+    ok = dismiss_worker(Sup, Pid),
+    State#state{overflow = Overflow -1};
+handle_checkin(Pid, State, kill) ->
+    #state{supervisor = Sup} = State,
+    ok = dismiss_worker(Sup, Pid),
+    NewWorker = new_worker(State#state.supervisor),
+    handle_checkin(NewWorker, State, keep).
+
+
 
 handle_checked_out_worker_exit(Pid, State) ->
     #state{supervisor = Sup,
-           monitors = Monitors,
-           overflow = Overflow,
-           total_workers_started = WorkersStarted} = State,
+        monitors = Monitors,
+        overflow = Overflow,
+        total_workers_started = WorkersStarted} = State,
     case queue:out(State#state.waiting) of
         {{value, {From, CRef, MRef}}, LeftWaiting} ->
             NewWorker = new_worker(State#state.supervisor),
@@ -455,13 +401,96 @@ handle_checked_in_worker_exit(State, Pid) ->
     {ok, ReapTimer} = reset_worker_reap(State#state{workers = NewWorkers}, Pid),
     State#state{workers = NewWorkers, reap_timer = ReapTimer, total_workers_started = WorkersStarted + 1}.
 
+prepopulate(N, _Sup, _Counter) when N < 1 ->
+    queue:new();
+prepopulate(N, Sup, Counter) ->
+    prepopulate(N, Sup, queue:new(), Counter).
+
+prepopulate(0, _Sup, Workers, _Counter) ->
+    Workers;
+prepopulate(N, Sup, Workers, Counter) ->
+    prepopulate(N-1, Sup, queue:in({erlang:monotonic_time(milli_seconds), new_worker(Sup)}, Workers), Counter + 1).
+
+new_worker(Sup) ->
+    {ok, Pid} = supervisor:start_child(Sup, []),
+    true = link(Pid),
+    Pid.
+
+new_worker(Sup, FromPid) ->
+    Pid = new_worker(Sup),
+    Ref = erlang:monitor(process, FromPid),
+    {Pid, Ref}.
+
+dismiss_worker(Sup, Pid) ->
+    true = unlink(Pid),
+    supervisor:terminate_child(Sup, Pid).
+
+reap_worker(Pid, #state{overflow = Overflow} = State) when Overflow == 1 ->
+    #state{workers = Workers,
+        supervisor = Sup} = State,
+    W = delete_worker_by_pid(Pid, Workers),
+    ok = dismiss_worker(Sup, Pid),
+    State#state{workers = W, overflow = Overflow -1, reap_timer = none};
+reap_worker(Pid, State = #state{overflow = Overflow}) when Overflow > 1 ->
+    #state{workers = Workers,
+        supervisor = Sup,
+        reap_timer = ReapTimer,
+        overflow_ttl = OverflowTtl} = State,
+    W = delete_worker_by_pid(Pid, Workers),
+    ok = dismiss_worker(Sup, Pid),
+    {ok, Timer} = reset_reap_timer(W, ReapTimer, OverflowTtl),
+    State#state{workers = W, overflow = Overflow -1, reap_timer = Timer};
+reap_worker(_Pid, State) ->
+    State.
+
+
+reset_worker_reap(#state{reap_timer = none} = _State, Pid) ->
+    ok = clear_worker_reap_message(Pid),
+    {ok, none};
+reset_worker_reap(#state{overflow = Overflow, reap_timer = ReapTimer} = _State, Pid) when Overflow == 0 ->
+    erlang:cancel_timer(ReapTimer),
+    ok = clear_worker_reap_message(Pid),
+    {ok, ReapTimer};
+reset_worker_reap(#state{reap_timer = ReapTimer, overflow = Overflow} = State, Pid) when Overflow > 0 ->
+    #state{workers = Workers,
+        overflow_ttl = OverflowTtl} = State,
+    erlang:cancel_timer(ReapTimer),
+    {ok, NewTimer} = reset_reap_timer(Workers, ReapTimer, OverflowTtl),
+    ok = clear_worker_reap_message(Pid),
+    {ok, NewTimer}.
+
+set_reap_timer(ReapTimer, _CurrentTime, _OverflowTtl, _Pid) when is_reference(ReapTimer) ->
+    {ok, ReapTimer};
+set_reap_timer(_ReapTimer, CurrentTime, OverflowTtl, Pid) ->
+    NewTimer = erlang:send_after(CurrentTime + OverflowTtl, self(), {reap_worker, Pid}, [{abs, true}]),
+    {ok, NewTimer}.
+
+reset_reap_timer(Workers, ReapTimer, OverflowTtl)->
+    erlang:cancel_timer(ReapTimer),
+    case queue:peek(Workers) of
+        {value, {Time, OldestWorker}} ->
+            ReapTime = Time + OverflowTtl,
+            NewTimer = erlang:send_after(ReapTime, self(), {reap_worker, OldestWorker}, [{abs, true}]),
+            {ok, NewTimer};
+        empty ->
+            {ok, none}
+    end.
+
+clear_worker_reap_message(Pid) ->
+    receive
+        {reap_worker, Pid} ->
+            ok
+    after 0 ->
+        ok
+    end.
+
+delete_worker_by_pid(Pid, Workers) ->
+    queue:filter(fun ({_Time, WPid}) -> WPid =/= Pid end, Workers).
+
 get_worker_with_strategy(Workers, fifo) ->
     queue:out(Workers);
 get_worker_with_strategy(Workers, lifo) ->
     queue:out_r(Workers).
-
-delete_worker_by_pid(Pid, Workers) ->
-    queue:filter(fun ({_Time, WPid}) -> WPid =/= Pid end, Workers).
 
 state_name(State = #state{overflow = Overflow, max_overflow = MaxOverflow}) when Overflow < 1->
     #state{max_overflow = MaxOverflow, workers = Workers} = State,
