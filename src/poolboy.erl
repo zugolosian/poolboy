@@ -39,7 +39,7 @@
     strategy = lifo :: lifo | fifo,
     overflow_ttl = 0 :: non_neg_integer(),
     reap_timer = none,
-    checkin_callback :: boolean()
+    checkin_callback = fun({_Pid, _Reason}) -> keep end :: function()
 }).
 
 init({PoolArgs, WorkerArgs}) ->
@@ -49,10 +49,8 @@ init({PoolArgs, WorkerArgs}) ->
     init(PoolArgs, WorkerArgs, #state{waiting = Waiting, monitors = Monitors}).
 
 init([{worker_module, Mod} | Rest], WorkerArgs, State) when is_atom(Mod) ->
-    code:ensure_loaded(Mod),
-    CheckinCallback = set_checkin_callback(Mod),
     {ok, Sup} = poolboy_sup:start_link(Mod, WorkerArgs),
-    init(Rest, WorkerArgs, State#state{supervisor = Sup, checkin_callback = CheckinCallback});
+    init(Rest, WorkerArgs, State#state{supervisor = Sup});
 init([{size, Size} | Rest], WorkerArgs, State) when is_integer(Size) ->
     init(Rest, WorkerArgs, State#state{size = Size});
 init([{max_overflow, MaxOverflow} | Rest], WorkerArgs, State) when is_integer(MaxOverflow) ->
@@ -63,11 +61,12 @@ init([{strategy, fifo} | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State#state{strategy = fifo});
 init([{overflow_ttl, OverflowTtl} | Rest], WorkerArgs, State) when is_integer(OverflowTtl) ->
     init(Rest, WorkerArgs, State#state{overflow_ttl = OverflowTtl});
+init([{checkin_callback, CheckinCallback} | Rest], WorkerArgs, State) when is_function(CheckinCallback, 1) ->
+    init(Rest, WorkerArgs, State#state{checkin_callback = CheckinCallback});
 init([_ | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State);
 init([], _WorkerArgs, #state{size = Size, supervisor = Sup, total_workers_started = Counter} = State) ->
     Workers = prepopulate(Size, Sup, Counter),
-    % Have to set the
     {ok, State#state{workers = Workers, total_workers_started = Size}}.
 
 -spec checkout(Pool :: pool()) -> pid().
@@ -158,25 +157,25 @@ status(Pool) ->
 full_status(Pool) ->
     gen_server:call(Pool, full_status).
 
-handle_cast({checkin, Pid}, State = #state{monitors = Monitors}) ->
+handle_cast({checkin, Pid}, State = #state{monitors = Monitors, checkin_callback = Callback}) ->
     case ets:lookup(Monitors, Pid) of
         [{Pid, _, MRef}] ->
             true = erlang:demonitor(MRef),
             true = ets:delete(Monitors, Pid),
-            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, normal),
-            NewState = handle_checkin(Pid, State, Kill),
+            KillOrKeep = Callback({Pid, normal}),
+            NewState = handle_checkin(Pid, State, KillOrKeep),
             {noreply, NewState};
         [] ->
             {noreply, State}
     end;
 
-handle_cast({cancel_waiting, CRef}, State) ->
-    case ets:match(State#state.monitors, {'$1', CRef, '$2'}) of
+handle_cast({cancel_waiting, CRef}, State = #state{monitors = Monitors, checkin_callback = Callback}) ->
+    case ets:match(Monitors, {'$1', CRef, '$2'}) of
         [[Pid, MRef]] ->
             demonitor(MRef, [flush]),
             true = ets:delete(State#state.monitors, Pid),
-            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, normal),
-            NewState = handle_checkin(Pid, State, Kill),
+            KillOrKeep = Callback({Pid, normal}),
+            NewState = handle_checkin(Pid, State, KillOrKeep),
             {noreply, NewState};
         [] ->
             Cancel = fun({_, Ref, MRef}) when Ref =:= CRef ->
@@ -272,12 +271,12 @@ handle_call(_Msg, _From, State) ->
     Reply = {error, invalid_message},
     {reply, Reply, State}.
 
-handle_info({'DOWN', MRef, _, _, _}, State) ->
-    case ets:match(State#state.monitors, {'$1', '_', MRef}) of
+handle_info({'DOWN', MRef, _, _, _}, State = #state{monitors = Monitors, checkin_callback = Callback}) ->
+    case ets:match(Monitors, {'$1', '_', MRef}) of
         [[Pid]] ->
             true = ets:delete(State#state.monitors, Pid),
-            Kill = handle_checkin_callback(State#state.checkin_callback, Pid, owner_death),
-            NewState = handle_checkin(Pid, State, Kill),
+            KillOrKeep = Callback({Pid, owner_death}),
+            NewState = handle_checkin(Pid, State, KillOrKeep),
             {noreply, NewState};
         [] ->
             Waiting = queue:filter(fun ({_, _, R}) -> R =/= MRef end, State#state.waiting),
@@ -318,19 +317,6 @@ start_pool(StartFun, PoolArgs, WorkerArgs) ->
             gen_server:StartFun(Name, ?MODULE, {PoolArgs, WorkerArgs}, [])
     end.
 
-set_checkin_callback(Module) ->
-    case erlang:function_exported(Module, worker_checkin, 2) of
-        true ->
-            fun Module:worker_checkin/2;
-        false ->
-            none
-    end.
-
-handle_checkin_callback(none, _Pid, _Reason) ->
-    keep;
-handle_checkin_callback(Function, Pid, Reason) ->
-    Function(Pid, Reason).
-
 handle_checkin(Pid, State, keep) ->
     #state{supervisor = Sup,
         waiting = Waiting,
@@ -366,7 +352,6 @@ handle_checkin(Pid, State, kill) ->
     ok = dismiss_worker(Sup, Pid),
     NewWorker = new_worker(State#state.supervisor),
     handle_checkin(NewWorker, State, keep).
-
 
 
 handle_checked_out_worker_exit(Pid, State) ->

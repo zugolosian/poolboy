@@ -8,9 +8,3 @@
     WorkerArgs :: proplists:proplist(),
     Pid        :: pid(),
     Reason     :: term().
-
--callback worker_checkin(Pid, Reason) -> keep | kill when
-    Pid :: pid(),
-    Reason :: normal | owner_death.
-
--optional_callbacks([worker_checkin/2]).

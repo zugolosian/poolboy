@@ -78,8 +78,10 @@ pool_test_() ->
             {<<"Pool behaves on owner death">>,
                 fun owner_death/0
             },
-            {<<"When worker_checkin callback exists and it's set to kill on owner death ensure that when using
-            overflow_ttl the worker is killed early">>,
+            {<<"When checkin_callback is set to kill on owner death it's reaped early in overflow_ttl situation and others are reaped normally">>,
+                fun checkin_callback_kill_on_owner_death_overflow_ttl/0
+            },
+            {<<"When checkin_callback is set to kill on owner death it's killed and not replaced">>,
                 fun checkin_callback_kill_on_owner_death/0
             },
             {<<"Worker checked-in after an exception in a transaction">>,
@@ -602,33 +604,76 @@ owner_death() ->
 
     ok = pool_call(Pid, stop).
 
-checkin_callback_kill_on_owner_death() ->
-    %% Check that a dead owner (a process that dies with a worker checked out)
-    %% causes the pool to dismiss the worker and prune the state space.
-    {ok, Pid} = new_pool_with_callback_worker(5, 5, 2000),
-    spawn(fun() ->
-        poolboy:checkout(Pid),
-        receive after 500 -> exit(normal) end
-          end),
-    timer:sleep(750),
-    ?assertEqual(5, queue:len(pool_call(Pid, get_avail_workers))),
-    ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
-    ?assertEqual(0, length(pool_call(Pid, get_all_monitors))),
+checkin_callback_kill_on_owner_death_overflow_ttl() ->
+    Callback = fun({_Pid, owner_death}) ->
+                        kill;
+                    ({_Pid, normal}) ->
+                        keep
+               end,
+    {ok, Pid} = new_pool_with_callback(1, 2, 600, Callback),
 
-    _Workers = [poolboy:checkout(Pid) || _ <- lists:seq(0, 4)],
+    _Worker = poolboy:checkout(Pid),
     ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     spawn(fun() ->
         poolboy:checkout(Pid),
-        receive after 500 -> exit(normal) end
+        receive after 300 -> exit(normal) end
           end),
     % Give it time to checkout
     timer:sleep(75),
-    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
     %% Check that the presence of the callback decides to purge the worker early
-    timer:sleep(500),
-    ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
+    timer:sleep(300),
+    ?assertEqual(1, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+
+    % Ensure when there are two overflow workers the second worker is reaped
+    % normally
+    Worker2 = poolboy:checkout(Pid),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    spawn(fun() ->
+        poolboy:checkout(Pid),
+        receive after 300 -> exit(normal) end
+          end),
+    % Give it time to checkout
+    timer:sleep(75),
+    ?assertEqual(3, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    % Worker 2 should be reaped in the normal period of 600 milliseconds
+    poolboy:checkin(Pid, Worker2),
+    ?assertEqual(1, queue:len(pool_call(Pid, get_avail_workers))),
+    timer:sleep(300),
+    ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(1, queue:len(pool_call(Pid, get_avail_workers))),
+    timer:sleep(100),
+    ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(1, queue:len(pool_call(Pid, get_avail_workers))),
+    timer:sleep(200),
+    ?assertEqual(1, length(pool_call(Pid, get_all_workers))),
     ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ok = pool_call(Pid, stop).
+
+checkin_callback_kill_on_owner_death() ->
+    Callback = fun({_Pid, owner_death}) ->
+        kill;
+        ({_Pid, normal}) ->
+            keep
+               end,
+    {ok, Pid} = new_pool_with_callback(1, 1, 0, Callback),
+    _Worker = poolboy:checkout(Pid),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    spawn(fun() ->
+        poolboy:checkout(Pid),
+        receive after 200 -> exit(normal) end
+          end),
+    % Give it time to checkout
+    timer:sleep(75),
+    ?assertEqual(2, length(pool_call(Pid, get_all_workers))),
+    timer:sleep(200),
+    ?assertEqual(1, length(pool_call(Pid, get_all_workers))),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ok = pool_call(Pid, stop).
+
+%%TODO Add tests for kill on normal checkin
 
 checkin_after_exception_in_transaction() ->
     {ok, Pool} = new_pool(2, 0),
@@ -845,11 +890,11 @@ new_pool_with_overflow_ttl_strategy(Size, MaxOverflow, OverflowTtl, Strategy) ->
         {size, Size}, {max_overflow, MaxOverflow},
         {overflow_ttl, OverflowTtl},{strategy, Strategy}]).
 
-new_pool_with_callback_worker(Size, MaxOverflow, OverflowTtl) ->
+new_pool_with_callback(Size, MaxOverflow, OverflowTtl, CallbackFunction) ->
     poolboy:start_link([{name, {local, poolboy_test}},
-        {worker_module, poolboy_test_worker_checkin_callback},
+        {worker_module, poolboy_test_worker},
         {size, Size}, {max_overflow, MaxOverflow},
-        {overflow_ttl, OverflowTtl}]).
+        {overflow_ttl, OverflowTtl}, {checkin_callback, CallbackFunction}]).
 
 pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).
