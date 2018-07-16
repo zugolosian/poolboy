@@ -28,7 +28,7 @@
 -type start_ret() :: {'ok', pid()} | 'ignore' | {'error', term()}.
 
 -record(state, {
-    supervisor :: pid(),
+    worker_supervisor :: pid(),
     workers :: queue:queue(),
     total_workers_started = 0 :: non_neg_integer(),
     waiting :: pid_queue(),
@@ -50,7 +50,7 @@ init({PoolArgs, WorkerArgs}) ->
 
 init([{worker_module, Mod} | Rest], WorkerArgs, State) when is_atom(Mod) ->
     {ok, Sup} = poolboy_sup:start_link(Mod, WorkerArgs),
-    init(Rest, WorkerArgs, State#state{supervisor = Sup});
+    init(Rest, WorkerArgs, State#state{worker_supervisor = Sup});
 init([{size, Size} | Rest], WorkerArgs, State) when is_integer(Size) ->
     init(Rest, WorkerArgs, State#state{size = Size});
 init([{max_overflow, MaxOverflow} | Rest], WorkerArgs, State) when is_integer(MaxOverflow) ->
@@ -65,7 +65,7 @@ init([{checkin_callback, CheckinCallback} | Rest], WorkerArgs, State) when is_fu
     init(Rest, WorkerArgs, State#state{checkin_callback = CheckinCallback});
 init([_ | Rest], WorkerArgs, State) ->
     init(Rest, WorkerArgs, State);
-init([], _WorkerArgs, #state{size = Size, supervisor = Sup, total_workers_started = Counter} = State) ->
+init([], _WorkerArgs, #state{size = Size, worker_supervisor = Sup, total_workers_started = Counter} = State) ->
     Workers = prepopulate(Size, Sup, Counter),
     {ok, State#state{workers = Workers, total_workers_started = Size}}.
 
@@ -192,7 +192,7 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_call({checkout, CRef, Block}, {FromPid, _} = From, State) ->
-    #state{supervisor = Sup,
+    #state{worker_supervisor = Sup,
            workers = Workers,
            monitors = Monitors,
            overflow = Overflow,
@@ -221,7 +221,6 @@ handle_call({checkout, CRef, Block}, {FromPid, _} = From, State) ->
             Waiting = queue:in({From, CRef, MRef}, State#state.waiting),
             {noreply, State#state{waiting = Waiting}}
     end;
-
 handle_call(status, _From, State) ->
     #state{workers = Workers,
            monitors = Monitors,
@@ -235,7 +234,7 @@ handle_call(full_status, _From, State) ->
         monitors = Monitors,
         overflow = Overflow,
         max_overflow = MaxOverflow,
-        supervisor = Sup,
+        worker_supervisor = Sup,
         waiting = Waiting,
         total_workers_started = WorkersStarted} = State,
     CheckedOutWorkers = ets:info(Monitors, size),
@@ -258,7 +257,7 @@ handle_call(get_avail_workers, _From, State) ->
     Workers = State#state.workers,
     {reply, Workers, State};
 handle_call(get_all_workers, _From, State) ->
-    Sup = State#state.supervisor,
+    Sup = State#state.worker_supervisor,
     WorkerList = supervisor:which_children(Sup),
     {reply, WorkerList, State};
 handle_call(get_all_monitors, _From, State) ->
@@ -303,7 +302,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, State) ->
     Workers = queue:to_list(State#state.workers),
     ok = lists:foreach(fun ({_Time, Pid}) -> unlink(Pid) end, Workers),
-    true = exit(State#state.supervisor, shutdown),
+    true = exit(State#state.worker_supervisor, shutdown),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -318,7 +317,7 @@ start_pool(StartFun, PoolArgs, WorkerArgs) ->
     end.
 
 handle_checkin(Pid, State, keep) ->
-    #state{supervisor = Sup,
+    #state{worker_supervisor = Sup,
         waiting = Waiting,
         monitors = Monitors,
         overflow = Overflow,
@@ -341,27 +340,21 @@ handle_checkin(Pid, State, keep) ->
             Workers = queue:in({erlang:monotonic_time(milli_seconds), Pid}, State#state.workers),
             State#state{workers = Workers, waiting = Empty, overflow = 0}
     end;
-handle_checkin(Pid, #state{overflow = Overflow, overflow_ttl = OverflowTtl} = State, kill) when Overflow > 0, OverflowTtl > 0 ->
+handle_checkin(Pid, #state{waiting = {[],[]}, overflow = Overflow} = State, kill) when Overflow > 0 ->
     reap_worker(Pid, State);
-handle_checkin(Pid, #state{overflow = Overflow} = State, kill) when Overflow > 0 ->
-    #state{supervisor = Sup} = State,
-    ok = dismiss_worker(Sup, Pid),
-    State#state{overflow = Overflow -1};
 handle_checkin(Pid, State, kill) ->
-    #state{supervisor = Sup} = State,
-    ok = dismiss_worker(Sup, Pid),
-    NewWorker = new_worker(State#state.supervisor),
-    handle_checkin(NewWorker, State, keep).
-
+    NewState = reap_worker(Pid, State),
+    NewWorker = new_worker(State#state.worker_supervisor),
+    handle_checkin(NewWorker, NewState, keep).
 
 handle_checked_out_worker_exit(Pid, State) ->
-    #state{supervisor = Sup,
+    #state{worker_supervisor = Sup,
         monitors = Monitors,
         overflow = Overflow,
         total_workers_started = WorkersStarted} = State,
     case queue:out(State#state.waiting) of
         {{value, {From, CRef, MRef}}, LeftWaiting} ->
-            NewWorker = new_worker(State#state.supervisor),
+            NewWorker = new_worker(State#state.worker_supervisor),
             true = ets:insert(Monitors, {NewWorker, CRef, MRef}),
             gen_server:reply(From, NewWorker),
             State#state{waiting = LeftWaiting, total_workers_started = WorkersStarted + 1};
@@ -379,7 +372,7 @@ handle_checked_in_worker_exit(State = #state{overflow = Overflow}, Pid) when Ove
     {ok, ReapTimer} = reset_worker_reap(State#state{workers = NewWorkers}, Pid),
     State#state{workers = NewWorkers, reap_timer = ReapTimer, overflow = Overflow - 1};
 handle_checked_in_worker_exit(State, Pid) ->
-    #state{workers = Workers, total_workers_started = WorkersStarted, supervisor = Sup} = State,
+    #state{workers = Workers, total_workers_started = WorkersStarted, worker_supervisor = Sup} = State,
     % Have to remove the existing worker before resetting timer
     FilteredWorkers = delete_worker_by_pid(Pid, Workers),
     NewWorkers = queue:in({erlang:monotonic_time(milli_seconds), new_worker(Sup)}, FilteredWorkers),
@@ -412,19 +405,25 @@ dismiss_worker(Sup, Pid) ->
 
 reap_worker(Pid, #state{overflow = Overflow} = State) when Overflow == 1 ->
     #state{workers = Workers,
-        supervisor = Sup} = State,
+        worker_supervisor = Sup} = State,
     W = delete_worker_by_pid(Pid, Workers),
     ok = dismiss_worker(Sup, Pid),
     State#state{workers = W, overflow = Overflow -1, reap_timer = none};
 reap_worker(Pid, State = #state{overflow = Overflow}) when Overflow > 1 ->
     #state{workers = Workers,
-        supervisor = Sup,
+        worker_supervisor = Sup,
         reap_timer = ReapTimer,
         overflow_ttl = OverflowTtl} = State,
     W = delete_worker_by_pid(Pid, Workers),
     ok = dismiss_worker(Sup, Pid),
     {ok, Timer} = reset_reap_timer(W, ReapTimer, OverflowTtl),
     State#state{workers = W, overflow = Overflow -1, reap_timer = Timer};
+reap_worker(Pid, State = #state{overflow_ttl = 0, overflow = Overflow}) when Overflow > 0 ->
+    #state{workers = Workers,
+        worker_supervisor = Sup} = State,
+    W = delete_worker_by_pid(Pid, Workers),
+    ok = dismiss_worker(Sup, Pid),
+    State#state{workers = W, overflow = Overflow -1};
 reap_worker(_Pid, State) ->
     State.
 
