@@ -341,11 +341,12 @@ handle_checkin(Pid, State, keep) ->
             State#state{workers = Workers, waiting = Empty, overflow = 0}
     end;
 handle_checkin(Pid, #state{waiting = {[],[]}, overflow = Overflow} = State, kill) when Overflow > 0 ->
-    reap_worker(Pid, State);
+    W = remove_worker(Pid, State),
+    State#state{workers=W, overflow = Overflow - 1};
 handle_checkin(Pid, State, kill) ->
-    NewState = reap_worker(Pid, State),
+    W = remove_worker(Pid, State),
     NewWorker = new_worker(State#state.worker_supervisor),
-    handle_checkin(NewWorker, NewState, keep).
+    handle_checkin(NewWorker, State#state{workers = W}, keep).
 
 handle_checked_out_worker_exit(Pid, State) ->
     #state{worker_supervisor = Sup,
@@ -403,27 +404,22 @@ dismiss_worker(Sup, Pid) ->
     true = unlink(Pid),
     supervisor:terminate_child(Sup, Pid).
 
-reap_worker(Pid, #state{overflow = Overflow} = State) when Overflow == 1 ->
+remove_worker(Pid, State) ->
     #state{workers = Workers,
         worker_supervisor = Sup} = State,
     W = delete_worker_by_pid(Pid, Workers),
     ok = dismiss_worker(Sup, Pid),
+    W.
+
+reap_worker(Pid, #state{overflow = Overflow} = State) when Overflow == 1 ->
+    W = remove_worker(Pid, State),
     State#state{workers = W, overflow = Overflow -1, reap_timer = none};
 reap_worker(Pid, State = #state{overflow = Overflow}) when Overflow > 1 ->
-    #state{workers = Workers,
-        worker_supervisor = Sup,
-        reap_timer = ReapTimer,
+    #state{reap_timer = ReapTimer,
         overflow_ttl = OverflowTtl} = State,
-    W = delete_worker_by_pid(Pid, Workers),
-    ok = dismiss_worker(Sup, Pid),
+    W = remove_worker(Pid, State),
     {ok, Timer} = reset_reap_timer(W, ReapTimer, OverflowTtl),
     State#state{workers = W, overflow = Overflow -1, reap_timer = Timer};
-reap_worker(Pid, State = #state{overflow_ttl = 0, overflow = Overflow}) when Overflow > 0 ->
-    #state{workers = Workers,
-        worker_supervisor = Sup} = State,
-    W = delete_worker_by_pid(Pid, Workers),
-    ok = dismiss_worker(Sup, Pid),
-    State#state{workers = W, overflow = Overflow -1};
 reap_worker(_Pid, State) ->
     State.
 
