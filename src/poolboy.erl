@@ -125,7 +125,7 @@ status(Pool) ->
     gen_server:call(Pool, status).
 
 -spec status(Pool :: pool(), Timeout :: pos_integer()) -> {atom(), integer(), integer(), integer()}.
-status(Pool) ->
+status(Pool, Timeout) ->
     gen_server:call(Pool, status, Timeout).
 
 -spec full_status(Pool :: pool()) -> proplists:proplist().
